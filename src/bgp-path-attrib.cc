@@ -31,6 +31,12 @@ uint8_t BgpPathAttrib::GetTypeFromBuffer(const uint8_t *from, size_t buffer_sz) 
     return *((uint8_t *) (from + 1));
 }
 
+bool BgpPathAttrib::GetExtendedFlagFromBuffer(const uint8_t *from, size_t buffer_sz)
+{
+  if (buffer_sz < 3) return -1;
+  return (((*((uint8_t *)from)) >> 4) & 0x1);
+}
+
 /**
  * @brief Construct a new Bgp Path Attrib:: Bgp Path Attrib object
  * 
@@ -131,7 +137,7 @@ ssize_t BgpPathAttrib::parse(const uint8_t *from, size_t length) {
 
     if (header_len < 0) return -1;
 
-    const uint8_t *buffer = from + 3;
+    const uint8_t *buffer = from + header_len;
 
     // Well-Known, Mandatory = !optional, transitive
     // Well-Known, Discretionary = !optional, !transitive
@@ -217,22 +223,23 @@ ssize_t BgpPathAttrib::parseHeader(const uint8_t *from, size_t buffer_sz) {
         logger->log(ERROR, "BgpPathAttrib::parseHeader: invalid attribute header size (extended but size < 4).\n");
         return -1;
     }
+    const ssize_t hdr_size = extended ? 4 : 3;
 
     if (extended) value_len = ntohs(getValue<uint16_t>(&buffer));
     else value_len = getValue<uint8_t>(&buffer);
 
-    if (value_len > buffer_sz - 3) {
+    if (value_len > buffer_sz - hdr_size) {
         err_code = E_UPDATE;
         // This is kind of "invalid length", but we are not using E_ATTR_LEN.
         // E_ATTR_LEN: "Attribute Length that conflict with the expected length
         // (based on the attribute type code)." This is not based on type code,
         // but it is buffer overflow, so we set subcode to E_UNSPEC,
         setError(E_UPDATE, E_UNSPEC_UPDATE, NULL, 0);
-        logger->log(ERROR, "BgpPathAttrib::parseHeader: value_length (%d) < buffer left (%d).\n", value_len, buffer_sz - 3);
+        logger->log(ERROR, "BgpPathAttrib::parseHeader: value_length (%d) < buffer left (%d).\n", value_len, buffer_sz - hdr_size);
         return -1;
     }
 
-    return extended ? 4 : 3;
+    return hdr_size;
 }
 
 /**
@@ -454,16 +461,16 @@ ssize_t BgpPathAttribAsPath::parse(const uint8_t *from, size_t length) {
         throw "bad_type";
     }
 
-    if (optional || !transitive || extended || partial) {
-        logger->log(ERROR, "BgpPathAttribAsPath::parse: bad flag bits, must be !optional, !extended, !partial, transitive.\n");
+    if (optional || !transitive || partial) {
+        logger->log(ERROR, "BgpPathAttribAsPath::parse: bad flag bits, must be !optional, !partial, transitive.\n");
         setError(E_UPDATE, E_ATTR_FLAG, from , value_len + header_length);
         return -1;
     }
 
-    const uint8_t *buffer = from + 3;
+    const uint8_t *buffer = from + header_length;
 
     // empty as_path
-    if (value_len == 0) return 3; 
+    if (value_len == 0) return header_length;
 
     uint8_t parsed_len = 0;
 
@@ -504,11 +511,11 @@ ssize_t BgpPathAttribAsPath::parse(const uint8_t *from, size_t length) {
         throw "bad_parse";
     }
 
-    return parsed_len + 3;
+    return parsed_len + header_length;
 }
 
 ssize_t BgpPathAttribAsPath::length() const {
-    size_t len = 3; // header len = 3
+    size_t len = (extended ? 4: 3); // header len = 4/3
 
     for (const BgpAsPathSegment &seg : as_paths) {
         len += (seg.is_4b ? 4 : 2) * seg.value.size() + 2;
@@ -577,15 +584,15 @@ ssize_t BgpPathAttribAsPath::write(uint8_t *to, size_t buffer_sz) const {
     }
 
     if (writeHeader(to, buffer_sz) < 0) return -1;
-    uint8_t *buffer = to + 2;
+    uint8_t *buffer = to + 2; // 1 for flags, 1 for type code
 
     // keep track of length field so we can write it later
     uint8_t *len_field = buffer;
 
     // skip length field for now
-    buffer++;
+    buffer += (extended ? 2: 1);
 
-    uint8_t written_len = 0;
+    uint16_t written_len = 0;
 
     for (const BgpAsPathSegment &seg : as_paths) {
         if (seg.is_4b != is_4b) { // maybe allow 2b-seg in 4b-mode?
@@ -617,10 +624,14 @@ ssize_t BgpPathAttribAsPath::write(uint8_t *to, size_t buffer_sz) const {
     }
 
     // fill in the length.
-    putValue<uint8_t>(&len_field, written_len);
+    if (extended) {
+      putValue<uint16_t>(&len_field, htons(written_len));
+    } else {
+      putValue<uint8_t>(&len_field, written_len);
+    }
 
-    // written_len: the as_paths, 3: attr header (flag, typecode, length)
-    return written_len + 3;
+    // written_len: the as_paths, 3/4: attr header (flag, typecode, length)
+    return written_len + (extended ? 4: 3);
 }
 
 /**
@@ -1470,21 +1481,23 @@ ssize_t BgpPathAttribCommunity::length() const {
 
 BgpPathAttribMpNlriBase::BgpPathAttribMpNlriBase(BgpLogHandler *logger) : BgpPathAttrib(logger) {
     optional = true;
+    afi = Afi::UNKNOWN_AFI;
+    safi = Safi::UNKNOWN_SAFI;
 }
 
-int16_t BgpPathAttribMpNlriBase::GetAfiFromBuffer(const uint8_t *buffer, size_t length) {
+int16_t BgpPathAttribMpNlriBase::GetAfiFromBuffer(const uint8_t *buffer, size_t length, bool extended) {
     if (length < 3) return -1;
-    const uint8_t *ptr = buffer + 3;
+    const uint8_t *ptr = buffer + (extended ? 4: 3);
     return ntohs(getValue<uint16_t>(&ptr));
 }
 
-ssize_t BgpPathAttribMpNlriBase::parseHeader(const uint8_t *from, size_t length) {
+ssize_t BgpPathAttribMpNlriBase::parseHeader(const uint8_t *from, size_t length, bool is_unreach) {
     ssize_t hdr_len = BgpPathAttrib::parseHeader(from, length);
 
     if (hdr_len < 0) return -1;
 
-    if (!optional || transitive || extended || extended) {
-        logger->log(ERROR, "BgpPathAttribMpNlriBase::parse: bad flag bits, must be optional, !extended, !partial, !transitive.\n");
+    if (!optional || transitive || partial) {
+        logger->log(ERROR, "BgpPathAttribMpNlriBase::parseHeader: bad flag bits, must be optional, !partial, !transitive.\n");
         setError(E_UPDATE, E_ATTR_FLAG, from , value_len + hdr_len);
         return -1;
     }
@@ -1494,7 +1507,7 @@ ssize_t BgpPathAttribMpNlriBase::parseHeader(const uint8_t *from, size_t length)
         throw "bad_type";
     }
 
-    if (value_len < 5) {
+    if (value_len < (is_unreach ? 3 : 5)) {
         logger->log(ERROR, "BgpPathAttribMpNlriBase::parseHeader: incompete attribute.\n");
         setError(E_UPDATE, E_OPT_ATTR, NULL, 0);
         return -1;
@@ -1508,6 +1521,7 @@ ssize_t BgpPathAttribMpNlriBase::parseHeader(const uint8_t *from, size_t length)
 }
 
 BgpPathAttribMpReachNlriIpv6::BgpPathAttribMpReachNlriIpv6(BgpLogHandler *logger) : BgpPathAttribMpNlriBase(logger) {
+    type_code = MP_REACH_NLRI;
     afi = IPV6;
 }
 
@@ -1520,7 +1534,7 @@ BgpPathAttrib* BgpPathAttribMpReachNlriIpv6::clone() const {
 }
 
 ssize_t BgpPathAttribMpReachNlriIpv6::parse(const uint8_t *from, size_t length) {
-    ssize_t hdr_len = parseHeader(from, length);
+    ssize_t hdr_len = BgpPathAttribMpNlriBase::parseHeader(from, length, false);
 
     if (hdr_len < 0) return -1;
 
@@ -1538,7 +1552,7 @@ ssize_t BgpPathAttribMpReachNlriIpv6::parse(const uint8_t *from, size_t length) 
         return -1;
     }
 
-    ssize_t buf_left = value_len - hdr_len - 1 + 3; // 3: attr headers
+    ssize_t buf_left = value_len - hdr_len - 1 + (extended ? 4 : 3); // 4/3: attr headers
 
     if (buf_left < (ssize_t) nexthop_length) {
         logger->log(ERROR, "BgpPathAttribMpReachNlriIpv6::parse: nexthop overflows buffer.\n");
@@ -1594,14 +1608,14 @@ ssize_t BgpPathAttribMpReachNlriIpv6::write(uint8_t *to, size_t buffer_sz) const
 
     if (header_len < 0) return -1;
     uint8_t *attr_len_field = to + header_len;
-    uint8_t *buffer = attr_len_field + 1;
+    uint8_t *buffer = attr_len_field + (extended ? 2: 1);
 
     if (buffer_sz - header_len < 5) {
         logger->log(ERROR, "BgpPathAttribMpReachNlriIpv6::write: dst buffer too small.\n");
         return -1;
     }
 
-    size_t written_len = header_len + 1;
+    size_t written_len = header_len + (extended ? 2: 1);
 
     putValue<uint16_t>(&buffer, htons(afi));
     putValue<uint8_t>(&buffer, safi);
@@ -1634,8 +1648,11 @@ ssize_t BgpPathAttribMpReachNlriIpv6::write(uint8_t *to, size_t buffer_sz) const
         buffer += rou_wrt_len;
     }
 
-    putValue<uint8_t>(&attr_len_field, written_len - 3);
-
+    if (extended) {
+      putValue<uint16_t>(&attr_len_field, htons(written_len - 4));
+    } else {
+      putValue<uint8_t>(&attr_len_field, written_len - 3);
+    }
     if (written_len != (size_t) (buffer - to)) {
         logger->log(FATAL, "BgpPathAttribMpReachNlriIpv6::write: inconsistent written size (len=%d, diff=%d)\n", written_len, buffer - to);
         return -1;
@@ -1688,7 +1705,7 @@ ssize_t BgpPathAttribMpReachNlriIpv6::doPrint(size_t indent, uint8_t **to, size_
 }
 
 ssize_t BgpPathAttribMpReachNlriIpv6::length() const {
-    size_t len = 3 + 5; // 3: attribute headers, 5: afi, safi, nh_len, res
+    size_t len = (extended ? 4 : 3) + 5; // 4 or 3: attribute headers, 5: afi, safi, nh_len, res
     bool has_linklocak = !v6addr_is_zero(nexthop_linklocal);
     len += (has_linklocak ? 32 : 16);
     for (const Prefix6 &route : nlri) {
@@ -1734,7 +1751,7 @@ BgpPathAttrib* BgpPathAttribMpReachNlriUnknow::clone() const {
 }
 
 ssize_t BgpPathAttribMpReachNlriUnknow::parse(const uint8_t *from, size_t length) {
-    ssize_t hdr_len = parseHeader(from, length);
+    ssize_t hdr_len = BgpPathAttribMpNlriBase::parseHeader(from, length, false);
     if (hdr_len < 0) return -1;
 
     if (nexthop_len != 0) free(nexthop);
@@ -1763,7 +1780,7 @@ ssize_t BgpPathAttribMpReachNlriUnknow::parse(const uint8_t *from, size_t length
 
     if (nlri_len != 0) free(nlri);
 
-    nlri_len = value_len - parsed_len - 3; // 3: attr header
+    nlri_len = value_len - parsed_len + (extended ? 4 : 3); // 4/3: attr header
     parsed_len += nlri_len;
     nlri = (uint8_t *) malloc(nlri_len);
     memcpy(nlri, buffer, nlri_len);
@@ -1772,7 +1789,7 @@ ssize_t BgpPathAttribMpReachNlriUnknow::parse(const uint8_t *from, size_t length
 }
 
 ssize_t BgpPathAttribMpReachNlriUnknow::write(uint8_t *to, size_t buffer_sz) const {
-    size_t expected_len = 3 + 5 + nexthop_len + nlri_len;
+    size_t expected_len = (extended ? 4 : 3) + 5 + nexthop_len + nlri_len;
 
     if (buffer_sz < expected_len) {
         logger->log(ERROR, "BgpPathAttribMpReachNlriUnknow::write: dst buffer too small.\n");
@@ -1783,7 +1800,11 @@ ssize_t BgpPathAttribMpReachNlriUnknow::write(uint8_t *to, size_t buffer_sz) con
     if (hdr_len < 0) return -1;
     uint8_t *buffer = to + hdr_len;
     
-    putValue<uint8_t>(&buffer, expected_len - 3);
+    if (extended) {
+      putValue<uint16_t>(&buffer, htons(expected_len - 4));
+    } else {
+      putValue<uint8_t>(&buffer, expected_len - 3);
+    }
     putValue<uint16_t>(&buffer, htons(afi));
     putValue<uint8_t>(&buffer, safi);
     putValue<uint8_t>(&buffer, nexthop_len);
@@ -1812,7 +1833,7 @@ ssize_t BgpPathAttribMpReachNlriUnknow::doPrint(size_t indent, uint8_t **to, siz
 }
 
 ssize_t BgpPathAttribMpReachNlriUnknow::length() const {
-    return 3 + 5 + nexthop_len + nlri_len;
+    return (extended ? 4 : 3) + 5 + nexthop_len + nlri_len;
 }
 
 const uint8_t* BgpPathAttribMpReachNlriUnknow::getNexthop() const {
@@ -1832,6 +1853,7 @@ size_t BgpPathAttribMpReachNlriUnknow::getNlriLength() const {
 }
 
 BgpPathAttribMpUnreachNlriIpv6::BgpPathAttribMpUnreachNlriIpv6(BgpLogHandler *logger) : BgpPathAttribMpNlriBase(logger) {
+    type_code = MP_UNREACH_NLRI;
     afi = IPV6;
 }
 
@@ -1845,7 +1867,7 @@ BgpPathAttrib* BgpPathAttribMpUnreachNlriIpv6::clone() const {
 }
 
 ssize_t BgpPathAttribMpUnreachNlriIpv6::parse(const uint8_t *from, size_t length) {
-    ssize_t hdr_len = parseHeader(from ,length);
+    ssize_t hdr_len = BgpPathAttribMpNlriBase::parseHeader(from, length, true);
     if (hdr_len < 0) return -1;
 
     if (afi != IPV6) {
@@ -1853,7 +1875,7 @@ ssize_t BgpPathAttribMpUnreachNlriIpv6::parse(const uint8_t *from, size_t length
         throw "bad_type";
     }
 
-    size_t buf_left = value_len - hdr_len + 3; // 3: attrib headers
+    size_t buf_left = value_len - hdr_len + (extended ? 4 : 3); // 4/3: attrib headers
     const uint8_t *buffer = from + hdr_len;
 
     while (buf_left > 0) {
@@ -1880,7 +1902,7 @@ ssize_t BgpPathAttribMpUnreachNlriIpv6::parse(const uint8_t *from, size_t length
 }
 
 ssize_t BgpPathAttribMpUnreachNlriIpv6::write(uint8_t *to, size_t buffer_sz) const {
-    if (buffer_sz < 3 + 3) {
+    if (buffer_sz < (extended ? 4 : 3) + 3) {
         logger->log(ERROR, "BgpPathAttribMpUnreachNlriIpv6::write: dst buffer too small.\n");
         return -1;
     }
@@ -1889,14 +1911,14 @@ ssize_t BgpPathAttribMpUnreachNlriIpv6::write(uint8_t *to, size_t buffer_sz) con
     if (hdr_len < 0) return -1;
 
     uint8_t *len_field = to + hdr_len;
-    uint8_t *buffer = len_field + 1; 
+    uint8_t *buffer = len_field + (extended ? 2 : 1);
 
     putValue<uint16_t>(&buffer, htons(afi));
     putValue<uint8_t>(&buffer, safi);
     size_t written_val_len = 3;
 
     for (const Prefix6 &route : withdrawn_routes) {
-        ssize_t pfx_wrt_ret = route.write(buffer, buffer_sz - 3 - written_val_len);
+        ssize_t pfx_wrt_ret = route.write(buffer, buffer_sz - (extended ? 4 : 3) - written_val_len);
         if (pfx_wrt_ret < 0) {
             logger->log(ERROR, "BgpPathAttribMpUnreachNlriIpv6::write: error writing withdrawn routes.\n");
             return -1;
@@ -1906,7 +1928,13 @@ ssize_t BgpPathAttribMpUnreachNlriIpv6::write(uint8_t *to, size_t buffer_sz) con
         written_val_len += pfx_wrt_ret;
     }
 
-    return 3 + written_val_len;
+    if (extended) {
+      putValue<uint16_t>(&len_field, htons(written_val_len));
+    } else {
+      putValue<uint8_t>(&len_field, written_val_len);
+    }
+
+    return (extended ? 4 : 3) + written_val_len;
 }
 
 ssize_t BgpPathAttribMpUnreachNlriIpv6::doPrint(size_t indent, uint8_t **to, size_t *buf_sz) const {
@@ -1938,7 +1966,7 @@ ssize_t BgpPathAttribMpUnreachNlriIpv6::doPrint(size_t indent, uint8_t **to, siz
 }
 
 ssize_t BgpPathAttribMpUnreachNlriIpv6::length() const {
-    size_t len = 3 + 3; // 3: attribute headers, 3: afi, safi
+    size_t len = (extended ? 4 : 3) + 3; // 4/3: attribute headers, 3: afi, safi
     for (const Prefix6 &route : withdrawn_routes) {
         len += (1 + (route.getLength() + 7) / 8);
     }
@@ -1974,7 +2002,7 @@ BgpPathAttrib* BgpPathAttribMpUnreachNlriUnknow::clone() const {
 }
 
 ssize_t BgpPathAttribMpUnreachNlriUnknow::parse(const uint8_t *from, size_t length) {
-    ssize_t hdr_len = parseHeader(from, length);
+    ssize_t hdr_len = BgpPathAttribMpNlriBase::parseHeader(from, length, true);
     if (hdr_len < 0) return -1;
 
     if (withdrawn_routes_len > 0) free(withdrawn_routes);
@@ -1989,7 +2017,7 @@ ssize_t BgpPathAttribMpUnreachNlriUnknow::parse(const uint8_t *from, size_t leng
 }
 
 ssize_t BgpPathAttribMpUnreachNlriUnknow::write(uint8_t *to, size_t buffer_sz) const {
-    size_t expected_len = 3 + 3 + withdrawn_routes_len;
+    size_t expected_len = (extended ? 4 : 3) + 3 + withdrawn_routes_len;
     if (buffer_sz < expected_len) {
         logger->log(ERROR, "BgpPathAttribMpUnreachNlriUnknow::write: dst buffer too small.\n");
         return -1;
@@ -1999,7 +2027,11 @@ ssize_t BgpPathAttribMpUnreachNlriUnknow::write(uint8_t *to, size_t buffer_sz) c
     if (hdr_len < 0) return -1;
 
     uint8_t *buffer = to + hdr_len;
-    putValue<uint8_t>(&buffer, expected_len - 3);
+    if (extended) {
+      putValue<uint16_t>(&buffer, htons(expected_len - 4));
+    } else {
+      putValue<uint8_t>(&buffer, expected_len - 3);
+    }
     putValue<uint16_t>(&buffer, htons(afi));
     putValue<uint8_t>(&buffer, safi);
     memcpy(buffer, withdrawn_routes, withdrawn_routes_len);
@@ -2020,7 +2052,7 @@ ssize_t BgpPathAttribMpUnreachNlriUnknow::doPrint(size_t indent, uint8_t **to, s
 }
 
 ssize_t BgpPathAttribMpUnreachNlriUnknow::length() const {
-    return 3 + 3 + withdrawn_routes_len;
+    return (extended ? 4 : 3) + 3 + withdrawn_routes_len;
 }
 
 const uint8_t* BgpPathAttribMpUnreachNlriUnknow::getWithdrawnRoutes() const {

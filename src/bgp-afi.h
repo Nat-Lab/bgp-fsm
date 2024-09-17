@@ -18,6 +18,7 @@ namespace libbgp {
  * 
  */
 enum Afi {
+    UNKNOWN_AFI = 0,
     IPV4 = 1,
     IPV6 = 2
 };
@@ -27,6 +28,7 @@ enum Afi {
  * 
  */
 enum Safi {
+    UNKNOWN_SAFI = 0,
     UNICAST = 1,
     MULTICAST = 2,
     UNICAST_AND_MULTICAST = 3

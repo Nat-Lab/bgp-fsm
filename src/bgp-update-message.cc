@@ -642,7 +642,8 @@ ssize_t BgpUpdateMessage::parse(const uint8_t *from, size_t msg_sz) {
             case AS4_AGGREGATOR: attrib = new BgpPathAttribAs4Aggregator(logger); break;
             case MP_REACH_NLRI: 
             case MP_UNREACH_NLRI: {
-                int16_t afi = BgpPathAttribMpNlriBase::GetAfiFromBuffer(buffer, attribute_len - parsed_attribute_len);
+                bool extended = BgpPathAttrib::GetExtendedFlagFromBuffer(buffer, attribute_len - parsed_attribute_len);
+                int16_t afi = BgpPathAttribMpNlriBase::GetAfiFromBuffer(buffer, attribute_len - parsed_attribute_len, extended);
                 if (afi < 0) {
                     logger->log(ERROR, "BgpUpdateMessage::parse: failed to parse mp-bgp afi.\n");
                     setError(E_UPDATE, E_UNSPEC, NULL, 0);

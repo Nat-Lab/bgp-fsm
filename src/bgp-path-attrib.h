@@ -83,6 +83,9 @@ public:
     // get attribute type from buffer, return 0 if failed.
     static uint8_t GetTypeFromBuffer(const uint8_t *buffer, size_t buffer_sz);
 
+    // get extended flag from buffer.
+    static bool GetExtendedFlagFromBuffer(const uint8_t *buffer, size_t buffer_sz);
+
     // print the attribute
     ssize_t doPrint(size_t indent, uint8_t **to, size_t *buf_sz) const;
 
@@ -449,7 +452,7 @@ public:
 class BgpPathAttribMpNlriBase : public BgpPathAttrib {
 public:
     BgpPathAttribMpNlriBase(BgpLogHandler *logger);
-    static int16_t GetAfiFromBuffer(const uint8_t *buffer, size_t length);
+    static int16_t GetAfiFromBuffer(const uint8_t *buffer, size_t length, bool extended);
 
     /**
      * @brief Address Family Identifier
@@ -464,7 +467,7 @@ public:
     uint8_t safi;
 
 protected:
-    ssize_t parseHeader(const uint8_t *buffer, size_t length);
+    ssize_t parseHeader(const uint8_t *buffer, size_t length, bool is_unreach);
 };
 
 /**
